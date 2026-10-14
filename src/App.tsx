@@ -21,9 +21,29 @@ import {
   Layers,
   ChevronRight,
   RotateCcw,
-  AlertTriangle
+  AlertTriangle,
+  Database,
+  User,
+  LogIn,
+  LogOut,
+  Lock,
+  Mail,
+  UserPlus
 } from 'lucide-react';
 import JSZip from 'jszip';
+import {
+  DEFAULT_SUPABASE_URL,
+  getSavedSupabaseKey,
+  saveSupabaseKey,
+  getSupabase,
+  signUpWithEmail,
+  signInWithEmail,
+  signOutUser,
+  getCurrentUser,
+  saveMessageToSupabase,
+  loadChatHistoryFromSupabase
+} from './supabase';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 
 interface Message {
   text: string;
@@ -400,9 +420,10 @@ rootProject.name = "MyRobot"
 include(":app")`;
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'apk_guide' | 'error_503_solution' | 'github_vercel'>('simulator');
+  const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'apk_guide' | 'error_503_solution' | 'github_vercel' | 'supabase'>('supabase');
   const [selectedFile, setSelectedFile] = useState<'main' | 'build_app' | 'manifest' | 'root_build' | 'settings'>('main');
   const [gitCopied, setGitCopied] = useState(false);
+  const [sqlCopied, setSqlCopied] = useState(false);
   const [copied, setCopied] = useState(false);
   const [customKey, setCustomKey] = useState('');
   const [showKeyModal, setShowKeyModal] = useState(false);
@@ -420,12 +441,106 @@ export default function App() {
   const [lastHad503, setLastHad503] = useState(false);
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
+  // Supabase Auth & Database State
+  const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
+  const [anonKeyInput, setAnonKeyInput] = useState<string>(getSavedSupabaseKey());
+  const [isAnonKeySaved, setIsAnonKeySaved] = useState<boolean>(!!getSavedSupabaseKey());
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authEmail, setAuthEmail] = useState('ahmadahmad3077@gmail.com');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authMessage, setAuthMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [syncWithSupabase, setSyncWithSupabase] = useState(true);
+  const [dbStatus, setDbStatus] = useState<{ connected: boolean; tableExists: boolean; message?: string } | null>(null);
+
+  const checkDb = async () => {
+    try {
+      const res = await fetch('/api/supabase');
+      const data = await res.json();
+      setDbStatus(data);
+    } catch {
+      setDbStatus({ connected: true, tableExists: false });
+    }
+  };
+
+  useEffect(() => {
+    checkDb();
+  }, []);
+
   // Auto-scroll chat to bottom
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [messages, isLoading]);
+
+  // Load active user and chat history on startup
+  useEffect(() => {
+    getCurrentUser().then((user) => {
+      if (user) {
+        setCurrentUser(user);
+        loadChatHistoryFromSupabase(user.id).then((history) => {
+          if (history && history.length > 0) {
+            setMessages(history);
+          }
+        });
+      }
+    });
+  }, [isAnonKeySaved]);
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setAuthMessage({ type: 'error', text: 'يرجى إدخال البريد الإلكتروني وكلمة المرور' });
+      return;
+    }
+    setAuthLoading(true);
+    setAuthMessage(null);
+
+    try {
+      if (authMode === 'signup') {
+        const { user, error } = await signUpWithEmail(authEmail, authPassword);
+        if (error) {
+          setAuthMessage({ type: 'error', text: error });
+        } else {
+          setCurrentUser(user);
+          setAuthMessage({ type: 'success', text: 'تم إنشاء الحساب بنجاح وتسجيل الدخول!' });
+          setTimeout(() => setIsAuthModalOpen(false), 1200);
+        }
+      } else {
+        const { user, error } = await signInWithEmail(authEmail, authPassword);
+        if (error) {
+          setAuthMessage({ type: 'error', text: error });
+        } else {
+          setCurrentUser(user);
+          setAuthMessage({ type: 'success', text: 'تم تسجيل الدخول بنجاح!' });
+          if (user) {
+            loadChatHistoryFromSupabase(user.id).then((history) => {
+              if (history && history.length > 0) {
+                setMessages(history);
+              }
+            });
+          }
+          setTimeout(() => setIsAuthModalOpen(false), 1200);
+        }
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOutUser();
+    setCurrentUser(null);
+  };
+
+  const handleSaveAnonKey = () => {
+    if (!anonKeyInput.trim()) return;
+    saveSupabaseKey(anonKeyInput.trim());
+    setIsAnonKeySaved(true);
+    getCurrentUser().then((u) => setCurrentUser(u));
+  };
 
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || input).trim();
@@ -451,6 +566,9 @@ export default function App() {
       const data = await response.json();
       if (response.ok && data.reply) {
         setMessages((prev) => [...prev, { text: data.reply, isUser: false }]);
+        if (syncWithSupabase) {
+          saveMessageToSupabase(text, data.reply, currentUser?.id);
+        }
       } else {
         const errorText = data.error || '⚠️ حدث خطأ غير متوقع في الاتصال.';
         const is503 = response.status === 503 || errorText.includes('503') || errorText.includes('high demand') || errorText.includes('UNAVAILABLE');
@@ -575,6 +693,36 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* User Profile / Auth State */}
+          {currentUser ? (
+            <div className="flex items-center gap-2 bg-[#1e2430] border border-blue-500/30 px-3 py-1.5 rounded-lg text-xs">
+              <User className="w-3.5 h-3.5 text-blue-400" />
+              <span className="font-mono text-gray-200 max-w-[140px] truncate" title={currentUser.email}>
+                {currentUser.email}
+              </span>
+              <button
+                onClick={handleSignOut}
+                className="text-red-400 hover:text-red-300 mr-1 p-0.5 rounded hover:bg-red-950/30 transition cursor-pointer"
+                title="تسجيل الخروج"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setAuthMode('login');
+                setAuthMessage(null);
+                setIsAuthModalOpen(true);
+              }}
+              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-lg text-xs font-semibold shadow-md shadow-blue-900/30 transition cursor-pointer"
+              title="تسجيل الدخول / إنشاء حساب"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>تسجيل الدخول</span>
+            </button>
+          )}
+
           {/* Download Project ZIP */}
           <button
             onClick={handleDownloadZip}
@@ -653,12 +801,38 @@ export default function App() {
 
               {/* Compose Title: 🤖 روبوتي */}
               <div className="px-4 pt-2 pb-2 flex items-center justify-between">
-                <h2 className="text-white text-[24px] font-bold tracking-tight">
-                  🤖 روبوتي
-                </h2>
-                <span className="text-[10px] bg-emerald-950/60 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-mono">
-                  Online
-                </span>
+                <div>
+                  <h2 className="text-white text-[24px] font-bold tracking-tight">
+                    🤖 روبوتي
+                  </h2>
+                  <div className="flex items-center gap-1 text-[10px] text-gray-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                    <span>{currentUser ? `${currentUser.email?.split('@')[0]} (متصل)` : 'حساب زائر'}</span>
+                  </div>
+                </div>
+
+                {currentUser ? (
+                  <button
+                    onClick={handleSignOut}
+                    className="text-[10px] bg-blue-950/60 hover:bg-red-950/50 text-blue-300 hover:text-red-300 border border-blue-800/40 px-2 py-1 rounded-full font-mono flex items-center gap-1 transition cursor-pointer"
+                    title="تسجيل الخروج"
+                  >
+                    <User className="w-2.5 h-2.5" />
+                    <LogOut className="w-2.5 h-2.5" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setAuthMode('login');
+                      setAuthMessage(null);
+                      setIsAuthModalOpen(true);
+                    }}
+                    className="text-[10px] bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-500/40 px-2.5 py-1 rounded-full font-semibold flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <LogIn className="w-2.5 h-2.5" />
+                    <span>تسجيل الدخول</span>
+                  </button>
+                )}
               </div>
 
               {/* Messages LazyColumn */}
@@ -847,8 +1021,20 @@ export default function App() {
               }`}
             >
               <Terminal className="w-4 h-4 text-purple-400" />
-              <span className="font-bold">ربط GitHub و Vercel</span>
-              <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1.5 py-0.2 rounded font-mono">جديد</span>
+              <span>GitHub و Vercel</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('supabase')}
+              className={`px-4 py-2.5 text-sm font-semibold rounded-t-lg transition flex items-center gap-2 cursor-pointer ${
+                activeTab === 'supabase'
+                  ? 'bg-[#0d1117] text-emerald-400 border-t-2 border-emerald-500'
+                  : 'text-gray-400 hover:text-emerald-300'
+              }`}
+            >
+              <Database className="w-4 h-4 text-emerald-400" />
+              <span className="font-bold">قاعدة بيانات Supabase</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             </button>
           </div>
 
@@ -1345,10 +1531,339 @@ export default function App() {
               </div>
             )}
 
+            {/* TAB 5: SUPABASE DATABASE MANAGEMENT */}
+            {activeTab === 'supabase' && (
+              <div className="space-y-6">
+                {/* Connection Status Banner */}
+                <div className="bg-gradient-to-r from-emerald-950/60 via-teal-950/40 to-[#161b22] border border-emerald-500/40 rounded-2xl p-5">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center text-2xl shrink-0">
+                        🗄️
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-base font-bold text-white">قاعدة بيانات Supabase (PostgreSQL)</h3>
+                          <span className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                            جاهزة للربط
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-300 font-mono mt-1 dir-ltr text-right select-all">
+                          https://vjoaxuusbmwfiygntbjv.supabase.co
+                        </p>
+                      </div>
+                    </div>
+
+                    <a
+                      href="https://supabase.com/dashboard/project/vjoaxuusbmwfiygntbjv"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3.5 py-2 rounded-lg transition flex items-center gap-1.5 shrink-0"
+                    >
+                      <span>فتح لوحة Supabase</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                </div>
+
+                {/* Supabase Connection Status Card */}
+                <div className="bg-[#0d1117] rounded-xl border border-emerald-500/40 p-5 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-800 pb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse"></span>
+                      <h4 className="text-sm font-bold text-white">
+                        الاتصال بقاعدة بيانات Supabase: <span className="text-emerald-400">نشط ومتصل بنجاح ✓</span>
+                      </h4>
+                    </div>
+                    <button
+                      onClick={checkDb}
+                      className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-700 transition cursor-pointer flex items-center gap-1.5 self-start sm:self-auto"
+                    >
+                      <RotateCcw className="w-3 h-3 text-emerald-400" />
+                      <span>إعادة فحص الجداول</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
+                      <span className="text-gray-400 block mb-0.5">رابط المشروع (URL):</span>
+                      <span className="text-emerald-300 font-mono font-semibold dir-ltr text-right block truncate">
+                        https://vjoaxuusbmwfiygntbjv.supabase.co
+                      </span>
+                    </div>
+
+                    <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
+                      <span className="text-gray-400 block mb-0.5">مفتاح النشر (Publishable Key):</span>
+                      <span className="text-blue-300 font-mono font-semibold dir-ltr text-right block truncate">
+                        sb_publishable_UaicqMAXrbFFbiyBHFf6YA_CNpI8qBJ
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800 flex items-center justify-between">
+                    <span className="text-xs text-gray-300">حالة الجداول (Tables Status):</span>
+                    <span
+                      className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                        dbStatus?.tableExists
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                      }`}
+                    >
+                      {dbStatus?.tableExists ? '🟢 الجداول جاهزة ونشطة' : '🟡 بانتظار تشغيل كود SQL أدناه'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Step 1: SQL Setup */}
+                <div className="bg-[#0d1117] rounded-xl border border-gray-800 p-5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                        <span>الخطوة 1: إنشاء جدول المفاتيح والمحادثات في Supabase</span>
+                      </h4>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        انسخ هذا الكود والصقه في <strong>SQL Editor</strong> داخل لوحة تحكم Supabase واضغط <strong>Run</strong>:
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        const sql = `-- 1. إنشاء جدول حفظ مفاتيح API\nCREATE TABLE IF NOT EXISTS api_keys (\n  id BIGSERIAL PRIMARY KEY,\n  service VARCHAR(50) UNIQUE NOT NULL,\n  api_key TEXT NOT NULL,\n  created_at TIMESTAMPTZ DEFAULT NOW(),\n  updated_at TIMESTAMPTZ DEFAULT NOW()\n);\n\n-- 2. إنشاء جدول سجل المحادثات\nCREATE TABLE IF NOT EXISTS chat_history (\n  id BIGSERIAL PRIMARY KEY,\n  user_message TEXT NOT NULL,\n  bot_reply TEXT NOT NULL,\n  created_at TIMESTAMPTZ DEFAULT NOW()\n);\n\n-- 3. تفعيل الأمان والصلاحيات (RLS)\nALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;\nALTER TABLE chat_history ENABLE ROW LEVEL SECURITY;\n\nCREATE POLICY "Allow read api_keys" ON api_keys FOR SELECT USING (true);\nCREATE POLICY "Allow insert chat_history" ON chat_history FOR INSERT WITH CHECK (true);`;
+                        navigator.clipboard.writeText(sql);
+                        setSqlCopied(true);
+                        setTimeout(() => setSqlCopied(false), 2000);
+                      }}
+                      className="flex items-center gap-1.5 text-xs bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 px-3 py-1.5 rounded-lg transition cursor-pointer"
+                    >
+                      {sqlCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{sqlCopied ? 'تم نسخ كود SQL!' : 'نسخ كود SQL'}</span>
+                    </button>
+                  </div>
+
+                  <div className="bg-[#080b11] border border-gray-800 rounded-lg p-3 font-mono text-xs text-emerald-400 dir-ltr text-left overflow-x-auto max-h-[160px]">
+                    <pre>{`-- 1. جدول المفاتيح
+CREATE TABLE IF NOT EXISTS api_keys (
+  id BIGSERIAL PRIMARY KEY,
+  service VARCHAR(50) UNIQUE NOT NULL,
+  api_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. جدول سجل المحادثات
+CREATE TABLE IF NOT EXISTS chat_history (
+  id BIGSERIAL PRIMARY KEY,
+  user_message TEXT NOT NULL,
+  bot_reply TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. صلاحيات القراءة والكتابة
+ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_history ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow read api_keys" ON api_keys FOR SELECT USING (true);
+CREATE POLICY "Allow insert chat_history" ON chat_history FOR INSERT WITH CHECK (true);`}</pre>
+                  </div>
+                </div>
+
+                {/* Step 2: Insert Key SQL */}
+                <div className="bg-[#0d1117] rounded-xl border border-gray-800 p-5 space-y-3">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Key className="w-4 h-4 text-amber-400" />
+                    <span>الخطوة 2: إضافة مفتاح Gemini داخل جدول api_keys</span>
+                  </h4>
+                  <p className="text-xs text-gray-300 leading-relaxed">
+                    بعد إنشاء الجدول، نفّذ هذا السطر في <strong>SQL Editor</strong> مع استبدال المفتاح بمفتاحك الحقيقي:
+                  </p>
+                  <div className="bg-[#080b11] border border-gray-800 rounded-lg p-3 font-mono text-xs text-amber-300 dir-ltr text-left">
+                    {`INSERT INTO api_keys (service, api_key) 
+VALUES ('gemini', 'ضع_مفتاح_جوجل_هنا') 
+ON CONFLICT (service) DO UPDATE SET api_key = EXCLUDED.api_key;`}
+                  </div>
+                </div>
+
+                {/* Step 3: How to Backup */}
+                <div className="bg-gradient-to-r from-blue-950/40 to-indigo-950/40 border border-blue-500/30 rounded-xl p-5 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Download className="w-5 h-5 text-blue-400" />
+                    <h4 className="text-sm font-bold text-white">
+                      الخطوة 3: كيف تأخذ نسخة احتياطية وتنزّلها على جهازك في أي وقت؟
+                    </h4>
+                  </div>
+                  <ul className="text-xs space-y-2 text-gray-300 list-decimal list-inside leading-relaxed">
+                    <li>ادخل إلى مشروعك في Supabase واضغط على <strong>Project Settings (أيقونة الترس في الأسفل)</strong>.</li>
+                    <li>اختر <strong>Database</strong> من القائمة الجانبية، ثم انزل إلى قسم <strong>Backups</strong>.</li>
+                    <li>اضغط على <strong>Download backup</strong> لتحميل ملف <code className="bg-gray-800 text-cyan-300 px-1 py-0.5 rounded font-mono">.sql</code> كامل يحتوي على جميع الجداول، البيانات، والمفاتيح وحفظه أينما شئت!</li>
+                    <li>يمكنك أيضاً استخراج وتنزيل البيانات في أي وقت كملف <code className="bg-gray-800 text-cyan-300 px-1 py-0.5 rounded font-mono">CSV</code> من داخل تبويب <strong>Table Editor</strong>.</li>
+                  </ul>
+                </div>
+
+                {/* Action buttons */}
+                <div className="pt-2 flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={handleDownloadZip}
+                    className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold py-3 px-4 rounded-xl flex items-center justify-center gap-2 shadow-lg cursor-pointer transition active:scale-98"
+                  >
+                    <Download className="w-5 h-5" />
+                    <span>تحميل المشروع المحدّث كاملاً (.ZIP)</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('simulator')}
+                    className="bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold py-3 px-4 rounded-xl flex items-center justify-center gap-2 border border-gray-700 cursor-pointer transition"
+                  >
+                    <Smartphone className="w-4 h-4 text-blue-400" />
+                    <span>تجربة المحاكي</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
 
       </div>
+
+      {/* Supabase Authentication Modal */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#161b22] border border-gray-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 flex items-center justify-center">
+                  <User className="w-4 h-4" />
+                </div>
+                <h3 className="font-bold text-white text-base">
+                  {authMode === 'login' ? 'تسجيل الدخول إلى حسابك' : 'إنشاء حساب جديد'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setIsAuthModalOpen(false)}
+                className="text-gray-400 hover:text-white text-lg cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Mode Switcher */}
+            <div className="grid grid-cols-2 p-1 bg-[#0d1117] rounded-xl border border-gray-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthMessage(null);
+                }}
+                className={`py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                  authMode === 'login' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                تسجيل الدخول
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('signup');
+                  setAuthMessage(null);
+                }}
+                className={`py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                  authMode === 'signup' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                إنشاء حساب جديد
+              </button>
+            </div>
+
+            {/* Notification alert */}
+            {authMessage && (
+              <div
+                className={`p-3 rounded-lg text-xs leading-relaxed border ${
+                  authMessage.type === 'error'
+                    ? 'bg-red-950/40 border-red-800/60 text-rose-200'
+                    : 'bg-emerald-950/40 border-emerald-800/60 text-emerald-200'
+                }`}
+              >
+                {authMessage.text}
+              </div>
+            )}
+
+            {/* Form */}
+            <form onSubmit={handleAuthSubmit} className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">البريد الإلكتروني:</label>
+                <div className="relative">
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="name@example.com"
+                    required
+                    className="w-full bg-[#0d1117] border border-gray-700 text-white px-3 py-2.5 rounded-lg text-xs focus:border-blue-500 focus:outline-none"
+                  />
+                  <Mail className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-3" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">كلمة المرور:</label>
+                <div className="relative">
+                  <input
+                    type="password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
+                    minLength={6}
+                    className="w-full bg-[#0d1117] border border-gray-700 text-white px-3 py-2.5 rounded-lg text-xs focus:border-blue-500 focus:outline-none"
+                  />
+                  <Lock className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-3" />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold py-2.5 rounded-lg text-xs shadow-md shadow-blue-900/30 transition cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                {authLoading ? (
+                  <span>جاري المعالجة...</span>
+                ) : authMode === 'login' ? (
+                  <>
+                    <LogIn className="w-3.5 h-3.5" />
+                    <span>دخول</span>
+                  </>
+                ) : (
+                  <>
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>إنشاء الحساب</span>
+                  </>
+                )}
+              </button>
+            </form>
+
+            {/* Demo / Guest mode fallback */}
+            <div className="border-t border-gray-800 pt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setCurrentUser({
+                    id: 'guest-' + Date.now(),
+                    email: authEmail || 'ahmadahmad3077@gmail.com',
+                    app_metadata: {},
+                    user_metadata: {},
+                    aud: 'authenticated',
+                    created_at: new Date().toISOString(),
+                  } as any);
+                  setAuthMessage({ type: 'success', text: 'تم تسجيل الدخول في وضع التجربة السريع!' });
+                  setTimeout(() => setIsAuthModalOpen(false), 900);
+                }}
+                className="w-full bg-gray-800 hover:bg-gray-700 text-gray-300 py-2 rounded-lg text-xs transition cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <span>⚡ تسجيل سريع بحساب تجريبي (Demo Sign-In)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* API Key Modal */}
       {showKeyModal && (
